@@ -166,7 +166,8 @@ function blank(){ return {name:'video-moi', aspect:'9:16', quality:'1080', clips
 function toast(m,ms=3500){ const t=$('#toast'); t.textContent=m; t.style.display='block'; clearTimeout(t._h); if(ms) t._h=setTimeout(()=>t.style.display='none',ms); }
 function fmt(s){ s=Math.max(0,s); const m=Math.floor(s/60); return String(m).padStart(2,'0')+':'+(s-m*60).toFixed(1).padStart(4,'0'); }
 function item(id){ return lib.find(x=>x.id===id); }
-function clipLen(c){ return (c.out-c.in)/(c.speed||1); }
+function playLen(c){ return (c.out-c.in)/(c.speed||1); }
+function clipLen(c){ return playLen(c)+(+c.holdEnd||0); }
 function total(){ return P.clips.reduce((a,c)=>a+clipLen(c),0); }
 function clipStart(i){ let s=0; for(let k=0;k<i;k++) s+=clipLen(P.clips[k]); return s; }
 function segAt(t){ let s=0; for(let i=0;i<P.clips.length;i++){ const L=clipLen(P.clips[i]); if(t<s+L-1e-6||i===P.clips.length-1) return i; s+=L; } return -1; }
@@ -314,7 +315,7 @@ function enter(i, local, play){
     const el=it.el; lib.forEach(o=>{ if(o!==it&&o.el&&o.el.pause&&o.kind==='video') o.el.pause(); });
     if(play||exporting){ const gn=route(el); gn.gain.value=c.mute?0:(c.volume??100)/100; }
     el.playbackRate=c.speed||1; el.preservesPitch=true;
-    const target=c.in+local*(c.speed||1);
+    const target=Math.min(c.in+local*(c.speed||1), c.out-0.03);
     if(Math.abs(el.currentTime-target)>0.04) el.currentTime=target;
     if(play) el.play().catch(()=>{}); else { el.pause(); el.onseeked=()=>{ el.onseeked=null; draw(); }; }
   } else { lib.forEach(o=>{ if(o.el&&o.el.pause&&o.kind==='video') o.el.pause(); }); }
@@ -339,17 +340,17 @@ function setPlay(p){
 }
 function seek(t){ T=Math.max(0,Math.min(total(),t)); const i=segAt(T); if(i>=0) enter(i,T-clipStart(i),playing); syncMusic(true); draw(); }
 function finish(){ T=total(); playing=false; $('#bPlay').textContent='▶'; pauseAll(); draw(); if(exporting) stopExport(true); }
-function tick(ts){
-  const dt=Math.min(0.1,(ts-lastTs)/1000); lastTs=ts;
+function tick(){
+  const now=performance.now(); const dt=Math.min(0.5,Math.max(0,(now-lastTs)/1000)); lastTs=now;
   if(playing&&P.clips.length){
     if(cur<0||cur>=P.clips.length) cur=segAt(T);
     const c=P.clips[cur], it=item(c.id), st=clipStart(cur), L=clipLen(c);
     if(c.kind==='video'&&it&&it.el){
-      const el=it.el;
-      if(!el.seeking) T=st+Math.max(0,(el.currentTime-c.in)/(c.speed||1));
-      if(el.currentTime>=c.out-0.02||el.ended||T>=st+L){
-        if(cur+1<P.clips.length){ T=st+L; enter(cur+1,0,true); } else finish();
-      } else if(el.paused&&!el.seeking) el.play().catch(()=>{});
+      const el=it.el, pe=st+playLen(c);
+      const reached=el.currentTime>=c.out-0.02||el.ended||T>=pe-1e-3;
+      if(!reached){ if(!el.seeking) T=st+Math.max(0,(el.currentTime-c.in)/(c.speed||1)); if(el.paused&&!el.seeking) el.play().catch(()=>{}); }
+      else { if(!el.paused) el.pause(); T=Math.max(T,pe); if(c.holdEnd>0) T+=dt; } // dừng khung cuối
+      if(T>=st+L-1e-3){ if(cur+1<P.clips.length){ T=st+L; enter(cur+1,0,true); } else finish(); }
     } else {
       T+=dt;
       if(T>=st+L){ if(cur+1<P.clips.length){ T=st+L; enter(cur+1,0,true); } else finish(); }
@@ -357,8 +358,10 @@ function tick(ts){
     if(playing){ syncMusic(false); draw(); }
     if(exporting){ $('#eprog').value=T/Math.max(0.01,total()); $('#emsg').textContent=fmt(T)+' / '+fmt(total()); }
   }
-  requestAnimationFrame(tick);
 }
+// chạy bằng requestAnimationFrame; khi cửa sổ bị che (Chrome giảm rAF) thì bộ đếm 30 lần/giây chạy thay
+function loop(){ tick(); requestAnimationFrame(loop); }
+setInterval(()=>{ if(playing && performance.now()-lastTs>45) tick(); },33);
 $('#bPlay').onclick=()=>setPlay(!playing);
 $('#bBack').onclick=()=>seek(0);
 
@@ -470,6 +473,7 @@ function renderInspector(){
     ${f('Khung hình',`<select data-k="fit"><option value="fill" ${c.fit==='fill'?'selected':''}>Lấp đầy (cắt mép)</option><option value="fit" ${c.fit==='fit'?'selected':''}>Vừa khung (viền đen)</option></select>`)}
     ${f('Phóng to giữa khung: <b>'+(c.zoom||1)+'x</b>',`<input type="range" min="1" max="2" step="0.02" data-k="zoom" value="${c.zoom||1}">`)}
     ${f('Hiện dần (s)',`<input type="number" step="0.1" min="0" max="3" data-k="fadeIn" value="${c.fadeIn||0}">`)}
+    ${img?'':f('Dừng khung cuối thêm (s)',`<input type="number" step="0.1" min="0" max="10" data-k="holdEnd" value="${c.holdEnd||0}">`)}
     <div class="hint">Dài trên timeline: ${clipLen(c).toFixed(2)}s. Kéo 2 mép khối trên timeline để cắt đầu/đuôi.</div>`+help;
     bind(box,c,(k,v)=>{ if(k==='out') c.out=Math.max(c.in+0.1, img?v:Math.min(v,dur)); else if(k==='in') c.in=Math.max(0,Math.min(v,c.out-0.1)); else return false; return true; });
   } else if(sel.type==='text'){ const t=P.texts[sel.i]; if(!t){sel=null;return renderInspector();}
@@ -540,59 +544,206 @@ async function detectCuts(file, onProg){
   const aspect = vh>vw*1.5?'9:16': vh>vw*1.1?'4:5': Math.abs(vh-vw)<20?'1:1':'16:9';
   return {source:file.name, duration:+dur.toFixed(3), aspect, cuts, shots};
 }
+// --- tiện ích chung cho phân tích ---
+function loadScript(src){ return new Promise((res,rej)=>{ if(document.querySelector(`script[src="${src}"]`)) return res(); const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=()=>rej(new Error('Không tải được '+src+' (cần mạng lần đầu).')); document.head.appendChild(s); }); }
+function videoFrom(url){ return new Promise((res,rej)=>{ const v=document.createElement('video'); v.muted=true; v.preload='auto'; v.src=url; hidden.appendChild(v); v.onloadeddata=()=>res(v); v.onerror=()=>rej(new Error('Không đọc được video.')); }); }
+function seekV(v,t){ return new Promise(r=>{ let d=false; const fin=()=>{ if(!d){ d=true; r(); } }; v.onseeked=fin; setTimeout(fin,1500); v.currentTime=Math.max(0,Math.min(t,(v.duration||0)-0.02)); }); }
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+
+// --- 1. Đọc chữ hook bằng OCR (Tesseract.js, chạy trong trình duyệt) ---
+let ocrWorker=null;
+async function ocrHook(url, dur, onMsg){
+  await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js');
+  onMsg('Đang tải bộ đọc chữ (lần đầu vài MB)…');
+  if(!ocrWorker) ocrWorker=await Tesseract.createWorker(['eng','vie']);
+  const v=await videoFrom(url); const W=720, H=Math.round(720*v.videoHeight/v.videoWidth);
+  const c=document.createElement('canvas'); c.width=W; c.height=H; const x=c.getContext('2d',{willReadFrequently:true});
+  const m=document.createElement('canvas'); m.width=W; m.height=H; const mx=m.getContext('2d',{willReadFrequently:true});
+  // chữ hook thường là chữ sáng viền tối hoặc chữ tối trên nền sáng → tách mặt nạ chữ để OCR dễ đọc
+  const mask=(mode)=>{ const src=x.getImageData(0,0,W,H), d=src.data, o=mx.createImageData(W,H), od=o.data;
+    for(let i=0;i<d.length;i+=4){ const L=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2], mxc=Math.max(d[i],d[i+1],d[i+2]), mnc=Math.min(d[i],d[i+1],d[i+2]);
+      const on = mode==='light' ? (L>205 && mxc-mnc<40) : (L<45); const v=on?0:255; od[i]=od[i+1]=od[i+2]=v; od[i+3]=255; }
+    mx.putImageData(o,0,0); return m; };
+  const clean=t=>t.replace(/[|_~^`]/g,'').replace(/\s+/g,' ').trim();
+  const words=t=>clean(t).toLowerCase().replace(/[^\p{L}\p{N} ]/gu,'').split(' ').filter(w=>w.length>1);
+  const sim=(a,b)=>{ const A=new Set(words(a)), B=words(b); if(!A.size||!B.length) return 0; return B.filter(w=>A.has(w)).length/Math.max(A.size,B.length); };
+  const times=[0.3,0.8,1.3,1.8,2.3,2.8,3.5,4.5].filter(t=>t<dur-0.05); const found=[];
+  for(const t of times){
+    onMsg(`Đang đọc chữ ở giây ${t}…`); await seekV(v,t); x.drawImage(v,0,0,W,H);
+    let bestRes=null;
+    for(const mode of ['light','dark']){
+      const {data}=await ocrWorker.recognize(mask(mode));
+      let lines=(data.lines||[]).filter(l=>l.confidence>=65 && clean(l.text).replace(/[^\p{L}\p{N}]/gu,'').length>=3);
+      if(!lines.length) continue;
+      const hmax=Math.max(...lines.map(l=>l.bbox.y1-l.bbox.y0)); lines=lines.filter(l=>l.bbox.y1-l.bbox.y0>=hmax*0.6);
+      lines.sort((p,q)=>p.bbox.y0-q.bbox.y0); const groups=[]; let gc=null;
+      for(const l of lines){ const h=l.bbox.y1-l.bbox.y0; if(gc && l.bbox.y0-gc.y1 < h*0.9){ gc.lines.push(l); gc.y1=Math.max(gc.y1,l.bbox.y1); } else { gc={lines:[l],y1:l.bbox.y1}; groups.push(gc); } }
+      const g=groups.sort((p,q)=>q.lines.reduce((s2,l)=>s2+l.text.length*l.confidence,0)-p.lines.reduce((s2,l)=>s2+l.text.length*l.confidence,0))[0];
+      const conf=g.lines.reduce((s2,l)=>s2+l.confidence,0)/g.lines.length;
+      if(!bestRes||conf>bestRes.conf) bestRes={mode,conf,lines:g.lines};
+    }
+    if(!bestRes) continue;
+    const L=bestRes.lines; const bb={x0:Math.min(...L.map(l=>l.bbox.x0)),y0:Math.min(...L.map(l=>l.bbox.y0)),x1:Math.max(...L.map(l=>l.bbox.x1)),y1:Math.max(...L.map(l=>l.bbox.y1))};
+    const hs=L.map(l=>l.bbox.y1-l.bbox.y0).sort((p,q)=>p-q); const lh=hs[Math.floor(hs.length/2)];
+    const px=x.getImageData(bb.x0,bb.y0,Math.max(1,bb.x1-bb.x0),Math.max(1,bb.y1-bb.y0)).data; const arr=[];
+    for(let i=0;i<px.length;i+=16) arr.push([px[i],px[i+1],px[i+2],0.299*px[i]+0.587*px[i+1]+0.114*px[i+2]]);
+    arr.sort((p,q)=>p[3]-q[3]); const k=Math.max(1,Math.floor(arr.length*0.12));
+    const avg=a2=>a2.reduce((s2,p)=>[s2[0]+p[0],s2[1]+p[1],s2[2]+p[2],s2[3]+p[3]],[0,0,0,0]).map(v2=>v2/a2.length);
+    found.push({t,text:L.map(l=>clean(l.text)).join('\n'),bb,lh,mode:bestRes.mode,dark:avg(arr.slice(0,k)),bright:avg(arr.slice(-k)),conf:bestRes.conf});
+  }
+  v.remove();
+  if(!found.length) return null;
+  // chữ hook = chữ xuất hiện sớm, lặp ở nhiều khung; tin cậy cao nhất trong nhóm đó
+  const f0=found[0]; const same=found.filter(fd=>sim(f0.text,fd.text)>=0.5||sim(fd.text,f0.text)>=0.5);
+  const pick=same.sort((p,q)=>q.conf-p.conf)[0]; const last=same.map(fd=>fd.t).sort((p,q)=>p-q).pop();
+  const nextT=times[times.indexOf(last)+1];
+  const hex=c3=>'#'+c3.slice(0,3).map(v2=>Math.round(v2).toString(16).padStart(2,'0')).join('');
+  const lightText=pick.mode==='light';
+  return {text:pick.text, start: f0.t<=0.35?0:+(f0.t-0.25).toFixed(2), end:+(nextT?(last+nextT)/2:last+0.5).toFixed(2),
+    x:+((pick.bb.x0+pick.bb.x1)/2/W*100).toFixed(1), y:+((pick.bb.y0+pick.bb.y1)/2/H*100).toFixed(1),
+    size:+Math.min(12,Math.max(2.5, pick.lh/H*100*1.25)).toFixed(1),
+    color: hex(lightText?pick.bright:pick.dark), stroke: hex(lightText?pick.dark:pick.bright),
+    strokeWidth: Math.abs(pick.bright[3]-pick.dark[3])>90?8:0, bg:'', font:'bold'};
+}
+
+// --- 2. Beat nhạc (Web Audio) ---
+async function beatsOf(url, from=0, maxDur=120){
+  const buf=await audio().decodeAudioData(await (await fetch(url)).arrayBuffer());
+  const sr=buf.sampleRate, hop=512, ch=buf.getChannelData(0), ch2=buf.numberOfChannels>1?buf.getChannelData(1):null;
+  const s0=Math.floor(from*sr), s1=Math.min(ch.length, s0+Math.floor(maxDur*sr)); const env=[];
+  for(let i=s0;i+hop<=s1;i+=hop){ let e=0; for(let j=i;j<i+hop;j++){ const v=ch2?(ch[j]+ch2[j])/2:ch[j]; e+=v*v; } env.push(Math.sqrt(e/hop)); }
+  if(env.length<50) return null;
+  const on=env.map((e,i)=>i?Math.max(0,e-env[i-1]):0); const mx=Math.max(...on)||1; const o=on.map(v=>v/mx);
+  const fps=sr/hop; const at=i=>{ const k=Math.floor(i), f=i-k; return (o[k]||0)*(1-f)+(o[k+1]||0)*f; };
+  let best=0,lagB=0;
+  for(let bpm=70;bpm<=180;bpm+=0.1){ const lag=fps*60/bpm; let s=0,n=0; for(let i=0;i+lag<o.length;i++){ s+=o[i]*at(i+lag); n++; } s/=n||1; if(s>best){ best=s; lagB=lag; } }
+  let ph=0,phB=-1; for(let p=0;p<lagB;p+=0.25){ let s=0; for(let t=p;t<o.length;t+=lagB) s+=at(t); if(s>phB){ phB=s; ph=p; } }
+  // bám lại từng beat vào đỉnh onset gần nhất (±70ms) để không trôi
+  const win=Math.round(0.07*fps), beats=[];
+  for(let t=ph;t<o.length;t+=lagB){ const c=Math.round(t); let bi=c, bv=o[c]||0; for(let j=c-win;j<=c+win;j++) if((o[j]||0)>bv){ bv=o[j]; bi=j; } beats.push(+((bv>0.25?bi:t)/fps).toFixed(3)); }
+  return {bpm:+(fps*60/lagB).toFixed(1), beats};
+}
+function nearest(arr,t){ let b=arr[0]; for(const a of arr) if(Math.abs(a-t)<Math.abs(b-t)) b=a; return b; }
+
+// --- 3. Chấm đoạn đẹp trong clip (độ nét, chuyển động, độ sáng) ---
+async function scoreClip(it, onMsg){
+  if(it.scores) return it.scores;
+  const v=await videoFrom(it.url); const w=64, h=Math.max(16,Math.round(64*v.videoHeight/v.videoWidth));
+  const c=document.createElement('canvas'); c.width=w; c.height=h; const x=c.getContext('2d',{willReadFrequently:true});
+  const out=[]; let prev=null;
+  for(let t=0;t<it.duration;t+=0.25){
+    onMsg&&onMsg(`Đang chấm đoạn đẹp: ${it.name} ${t.toFixed(1)}s`); await seekV(v,t); x.drawImage(v,0,0,w,h);
+    const d=x.getImageData(0,0,w,h).data; const gy=new Float32Array(w*h); let lum=0;
+    for(let i=0;i<w*h;i++){ gy[i]=0.299*d[i*4]+0.587*d[i*4+1]+0.114*d[i*4+2]; lum+=gy[i]; } lum/=w*h;
+    let lap=0,lapS=0,n=0; for(let yy=1;yy<h-1;yy++) for(let xx=1;xx<w-1;xx++){ const i=yy*w+xx; const L=4*gy[i]-gy[i-1]-gy[i+1]-gy[i-w]-gy[i+w]; lap+=L; lapS+=L*L; n++; }
+    const sharp=lapS/n-(lap/n)**2; let mot=0; if(prev){ for(let i=0;i<w*h;i++) mot+=Math.abs(gy[i]-prev[i]); mot/=w*h; } prev=gy;
+    out.push({t:+t.toFixed(2),sharp,mot,lum});
+  }
+  v.remove();
+  const ms=Math.max(...out.map(o=>o.sharp))||1, mm=[...out.map(o=>o.mot)].sort((a,b)=>a-b)[Math.floor(out.length/2)]||1;
+  it.scores=out.map(o=>({t:o.t, s: o.lum<18?0 : 0.55*Math.sqrt(o.sharp/ms) + 0.3*Math.min(1,o.mot/(2*mm)) + 0.15*(o.lum>40&&o.lum<225?1:0) - (o.mot>6*mm?0.3:0)}));
+  return it.scores;
+}
+function pickWindow(scores, need, dur, used){
+  let best=null;
+  for(let a=0; a+need<=dur+1e-3; a+=0.25){
+    const ov=used.reduce((s,[u0,u1])=>s+Math.max(0,Math.min(a+need,u1)-Math.max(a,u0)),0); if(ov>need*0.3) continue;
+    const win=scores.filter(o=>o.t>=a&&o.t<=a+need); if(!win.length) continue;
+    const sc=win.reduce((s,o)=>s+o.s,0)/win.length; if(!best||sc>best.sc) best={a,sc};
+  }
+  return best?best.a:null;
+}
+
+// --- Học từ mẫu ---
 $('#bLearn').onclick=()=>$('#fSample').click();
 $('#fSample').onchange=async e=>{
   const file=e.target.files[0]; e.target.value=''; if(!file) return;
   setPlay(false); detecting=true;
-  modal(`<h3>Đang học nhịp từ mẫu</h3><div class="hint" style="margin:0 0 8px"></div><progress id="lprog" max="1" value="0" style="width:100%"></progress><div class="row" style="margin-top:12px"><button id="lCancel">Huỷ</button></div>`);
-  $('#mcard .hint').textContent=file.name+' – tool xem lướt từng khung để tìm chỗ chuyển cảnh.';
+  modal(`<h3>Đang học từ mẫu</h3><div class="hint" id="lmsg" style="margin:0 0 8px"></div><progress id="lprog" max="1" value="0" style="width:100%"></progress>
+    <label class="chk"><input type="checkbox" id="lOcr" checked> Đọc chữ hook trong mẫu (tải bộ đọc chữ vài MB lần đầu)</label>
+    <div class="row" style="margin-top:12px"><button id="lCancel">Huỷ</button></div>`);
+  const msg=t=>{ const el=$('#lmsg'); if(el) el.textContent=t; };
+  msg(file.name+' – đang tìm chỗ chuyển cảnh…');
   $('#lCancel').onclick=()=>{ detecting=false; closeModal(); };
-  let r; try{ r=await detectCuts(file, p=>{ const el=$('#lprog'); if(el) el.value=p; }); }catch(err){ detecting=false; return modal(`<h3>Lỗi</h3><div class="hint">${esc(err.message)}</div><div class="row" style="margin-top:12px"><button onclick="closeModal()">Đóng</button></div>`); }
-  detecting=false; if(!r) return;
+  const errBox=m=>modal(`<h3>Lỗi</h3><div class="hint">${esc(m)}</div><div class="row" style="margin-top:12px"><button onclick="closeModal()">Đóng</button></div>`);
+  let r; try{ r=await detectCuts(file, p=>{ const el=$('#lprog'); if(el) el.value=p*0.6; }); }catch(err){ detecting=false; return errBox(err.message); }
+  if(!r||!detecting){ detecting=false; return; }
+  const url=URL.createObjectURL(file); let beat=null, hook=null; const doOcr=$('#lOcr')&&$('#lOcr').checked;
+  try{ msg('Đang nghe nhịp nhạc của mẫu…'); beat=await beatsOf(url,0,r.duration); }catch(err){ beat=null; }
+  if(beat&&r.cuts.length){ const hit=r.cuts.filter(c=>Math.abs(nearest(beat.beats,c)-c)<=0.09).length; r.bpm=beat.bpm; r.cutsOnBeat=+(hit/r.cuts.length).toFixed(2); r.beatSync=r.cutsOnBeat>=0.6; }
+  const lp=$('#lprog'); if(lp) lp.value=0.7;
+  if(doOcr&&detecting){ try{ hook=await ocrHook(url, r.duration, msg); }catch(err){ toast('Không đọc được chữ: '+err.message,5000); } }
+  URL.revokeObjectURL(url);
+  if(!detecting) return; detecting=false;
   const base=file.name.replace(/\.[^.]+$/,'');
-  modal(`<h3>Nhịp của mẫu</h3>
-    <div class="hint" style="margin:0">${esc(r.source)} · ${r.duration.toFixed(1)}s · ${r.shots.length} cảnh · trung bình ${(r.duration/r.shots.length).toFixed(2)}s/cảnh · khung ${r.aspect}</div>
+  const h=hook||{text:'',start:0,end:2,x:50,y:14,size:4.5,color:'#FFFFFF',stroke:'#000000',strokeWidth:8,bg:'',font:'bold'};
+  modal(`<h3>Phong cách của mẫu</h3>
+    <div class="hint" style="margin:0">${esc(r.source)} · ${r.duration.toFixed(1)}s · ${r.shots.length} cảnh · TB ${(r.duration/r.shots.length).toFixed(2)}s/cảnh · khung ${r.aspect}</div>
     ${barsHtml(r.shots)}
-    <div class="hint" style="margin:0 0 6px">Cảnh (giây): ${r.shots.map(s=>s.toFixed(2)).join(' · ')}</div>
+    <div class="hint" style="margin:0 0 6px">${r.bpm?`Nhạc ~${r.bpm} BPM · ${Math.round(r.cutsOnBeat*100)}% điểm cắt rơi đúng beat${r.beatSync?' → cắt theo beat':''}`:'Không nghe được nhạc trong mẫu (hoặc mẫu không có tiếng).'}</div>
+    ${f(hook?'Chữ hook đọc được (sửa nếu sai)':'Không thấy chữ hook – tự điền nếu có',`<textarea id="sHook" rows="2" placeholder="VD: Wait for it 👀">${esc(h.text)}</textarea>`)}
+    <div class="row"><div>${f('Hiện từ – đến (giây)',`<div class="row"><input id="sHookS" type="number" step="0.1" value="${h.start}"><input id="sHookE" type="number" step="0.1" value="${h.end}"></div>`)}</div>
+    <div>${f('Vị trí dọc (%) · cỡ',`<div class="row"><input id="sHookY" type="number" step="1" value="${h.y}"><input id="sHookZ" type="number" step="0.5" value="${h.size}"></div>`)}</div></div>
+    <div class="row"><div>${f('Màu chữ',`<input type="color" id="sCol" value="${h.color}">`)}</div><div>${f('Màu viền',`<input type="color" id="sStr" value="${h.stroke}">`)}</div></div>
     ${f('Tên phong cách',`<input id="sName" value="${esc(base)}">`)}
-    ${f('Chữ hook mặc định (để trống nếu không có)',`<input id="sHook" placeholder="VD: Wait for it 👀">`)}
-    <div class="row"><div>${f('Hook hiện đến giây',`<input id="sHookEnd" type="number" step="0.1" value="2">`)}</div><div>${f('Vị trí dọc (%)',`<input id="sHookY" type="number" step="1" value="14">`)}</div></div>
     <label class="chk"><input type="checkbox" id="sPunch"> Phóng to xen kẽ các cảnh (punch-in)</label>
+    <label class="chk"><input type="checkbox" id="sBeat" ${r.beatSync?'checked':''}> Cắt khớp beat nhạc nền khi áp dụng</label>
     <label class="chk"><input type="checkbox" id="sKeep" checked> Giữ tiếng gốc của clip</label>
-    <div class="hint">Tool chỉ bắt được nhịp cắt. Chữ hook và zoom bạn tự điền theo mẫu (hoặc nhờ Claude phân tích rồi nhập file phong cách).</div>
     <div class="row" style="margin-top:12px"><button onclick="closeModal()">Huỷ</button><button class="pri" id="sSave">Lưu phong cách</button></div>`);
   $('#sSave').onclick=()=>{
-    const hook=$('#sHook').value.trim(); const name=$('#sName').value.trim()||base;
-    const st={name, ...r, texts: hook?[{text:hook,start:0,end:+$('#sHookEnd').value||2,x:50,y:+$('#sHookY').value||14,size:4.5,color:'#FFFFFF',stroke:'#000000',strokeWidth:8,bg:'',font:'bold'}]:[],
-      punchIn:$('#sPunch').checked, speed:1, fadeInFirst:0, musicVolume:60, keepClipAudio:$('#sKeep').checked};
+    const text=$('#sHook').value.trim(); const name=$('#sName').value.trim()||base;
+    const st={name, ...r, texts: text?[{...h, text, start:+$('#sHookS').value||0, end:+$('#sHookE').value||2, y:+$('#sHookY').value||h.y, size:+$('#sHookZ').value||h.size, color:$('#sCol').value, stroke:$('#sStr').value}]:[],
+      punchIn:$('#sPunch').checked, beatSync:$('#sBeat').checked, speed:1, fadeInFirst:0, musicVolume:60, keepClipAudio:$('#sKeep').checked};
     addStyle(st); toast('Đã lưu phong cách "'+name+'". Bấm ✨ Áp phong cách để dùng.'); closeModal();
   };
 };
 
-function applyStyle(st, srcItems, hook, targetDur, musicId){
+// --- Áp phong cách ---
+async function applyStyle(st, srcItems, opt, onMsg){
+  // opt: {hook, targetDur, musicId, smart (chọn đoạn đẹp), beat (khớp beat), fill: 'other'|'slow'|'hold'}
   let shots=(st.shots&&st.shots.length?st.shots:[st.duration||10]).filter(s=>s>0.05);
-  if(targetDur>0){ const k=targetDur/shots.reduce((a,b)=>a+b,0); shots=shots.map(s=>s*k); }
-  const speed=+st.speed||1;
-  const srcs=srcItems.map(it=>({it, cursor:0}));
-  const clips=[];
+  if(opt.targetDur>0){ const k=opt.targetDur/shots.reduce((a,b)=>a+b,0); shots=shots.map(s=>s*k); }
+  const mus = opt.musicId ? item(opt.musicId) : (P.music&&item(P.music.id));
+  let beatInfo='';
+  if(opt.beat && mus){
+    try{ onMsg('Đang dò beat nhạc nền…'); const bt=await beatsOf(mus.url, P.music&&P.music.id===mus.id?P.music.start||0:0, shots.reduce((a,b)=>a+b,0)+5);
+      if(bt&&bt.beats.length>2){ let acc=0, prev=0; const nb=[];
+        shots.forEach((d,i)=>{ acc+=d; if(i===shots.length-1){ nb.push(acc); return; } let b=nearest(bt.beats.filter(x=>x>prev+0.3),acc); if(b==null) b=acc; nb.push(b); prev=b; });
+        shots=nb.map((b,i)=>+(b-(i?nb[i-1]:0)).toFixed(3)).filter(d=>d>0.05); beatInfo=` · khớp beat ~${bt.bpm} BPM`; }
+    }catch(err){ beatInfo=' · không dò được beat'; }
+  }
+  const speed=+st.speed||1; const srcs=srcItems.map(it=>({it, cursor:0, used:[]}));
+  if(opt.smart) for(const s of srcs) if(s.it.kind==='video') await scoreClip(s.it, onMsg);
+  const clips=[]; let short=0;
   shots.forEach((d,i)=>{
     const s=srcs[i%srcs.length], it=s.it;
     if(it.kind==='image'){ clips.push({id:it.id,name:it.name,kind:'image',in:0,out:+d.toFixed(3),speed:1,volume:100,mute:false,fit:'fill',fadeIn:0}); return; }
-    let need=Math.min(d*speed, it.duration);
-    if(s.cursor+need>it.duration) s.cursor = i<srcs.length ? Math.max(0,it.duration-need) : 0;
-    const c={id:it.id,name:it.name,kind:'video',in:+s.cursor.toFixed(3),out:+(s.cursor+need).toFixed(3),speed,volume:100,mute:st.keepClipAudio===false,fit:'fill',fadeIn:0};
+    const need=d*speed; const c={id:it.id,name:it.name,kind:'video',speed,volume:100,mute:st.keepClipAudio===false,fit:'fill',fadeIn:0};
+    if(need>it.duration-0.02){ short++;
+      if(opt.fill==='slow'){ c.in=0; c.out=+it.duration.toFixed(3); c.speed=+Math.max(0.25,it.duration/d).toFixed(3); }
+      else if(opt.fill==='hold'){ c.in=0; c.out=+it.duration.toFixed(3); c.holdEnd=+(d-it.duration/speed).toFixed(3); }
+      else { c.in=0; c.out=+it.duration.toFixed(3); }
+    } else if(opt.smart && it.scores){
+      const a=pickWindow(it.scores,need,it.duration,s.used); const a0=a==null?Math.max(0,Math.min(s.cursor,it.duration-need)):a;
+      c.in=+a0.toFixed(3); c.out=+(a0+need).toFixed(3); s.used.push([a0,a0+need]);
+    } else {
+      if(s.cursor+need>it.duration) s.cursor = i<srcs.length ? Math.max(0,it.duration-need) : 0;
+      c.in=+s.cursor.toFixed(3); c.out=+(s.cursor+need).toFixed(3); s.cursor+=need;
+    }
     if(st.punchIn && i%2===1) c.zoom=1.12;
-    clips.push(c); s.cursor+=need;
+    clips.push(c);
   });
   if(clips.length && st.fadeInFirst) clips[0].fadeIn=+st.fadeInFirst;
-  const tot=clips.reduce((a,c)=>a+(c.out-c.in)/(c.speed||1),0);
+  const tot=clips.reduce((a,c)=>a+clipLen(c),0);
   const texts=(st.texts||[]).map(t=>({...t, end:Math.min(+t.end||tot, tot)}));
-  if(hook){ if(texts.length) texts[0].text=hook; else texts.push({text:hook,start:0,end:Math.min(2,tot),x:50,y:14,size:4.5,color:'#FFFFFF',stroke:'#000000',strokeWidth:8,bg:'',font:'bold'}); }
+  if(opt.hook){ if(texts.length) texts[0].text=opt.hook; else texts.push({text:opt.hook,start:0,end:Math.min(2,tot),x:50,y:14,size:4.5,color:'#FFFFFF',stroke:'#000000',strokeWidth:8,bg:'',font:'bold'}); }
   P.clips=clips; P.texts=texts; P.aspect=st.aspect||P.aspect;
-  const m=musicId&&item(musicId); P.music=m?{id:m.id,name:m.name,volume:+st.musicVolume||60,start:0}:P.music;
+  if(opt.musicId&&mus) P.music={id:mus.id,name:mus.name,volume:+st.musicVolume||60,start:0};
   sel=null; T=0; syncUI(); refresh(); seek(0);
-  const want=shots.reduce((a,b)=>a+b,0);
-  return want-tot>0.3 ? `Một số clip ngắn hơn cảnh cần lấy nên video còn ${tot.toFixed(1)}s (thay vì ${want.toFixed(1)}s). Thêm clip dài hơn nếu cần.` : '';
+  const want=shots.reduce((a,b)=>a+b,0); let note=beatInfo;
+  if(short) note+=` · ${short} cảnh clip ngắn hơn cần → ${opt.fill==='slow'?'làm chậm':opt.fill==='hold'?'dừng khung cuối':'dùng cả clip'}`;
+  if(want-tot>0.3) note+=` · video còn ${tot.toFixed(1)}s (thay vì ${want.toFixed(1)}s)`;
+  return note;
 }
 function styleFromProject(name){
   return {name, source:'dự án '+(P.name||''), duration:+total().toFixed(3), aspect:P.aspect,
@@ -609,20 +760,29 @@ function openApply(){
       :'<div class="hint" style="margin:0">Chưa có phong cách nào. Bấm 🎯 Học nhịp từ mẫu, hoặc nhập file phong cách Claude gửi.</div>'}
     <div class="row" style="margin-top:8px"><button id="aImport">Nhập file phong cách (.json)</button>${P.clips.length?'<button id="aFromProj">Lưu dự án này thành phong cách</button>':''}</div>
     ${styles.length?`
-    <label>Clip dùng (lấy lần lượt theo thứ tự, mỗi cảnh một clip)</label>
+    <label>Clip dùng (lần lượt, mỗi cảnh một clip)</label>
     ${vids.length?vids.map(v=>`<label class="chk"><input type="checkbox" class="aClip" value="${v.id}" checked> ${esc(v.name)} ${v.kind==='image'?'(ảnh)':'· '+v.duration.toFixed(1)+'s'}</label>`).join(''):'<div class="hint" style="margin:0">Thư viện chưa có video/ảnh nào.</div>'}
     ${f('Chữ hook (để trống = dùng chữ của phong cách)',`<input id="aHook">`)}
-    <div class="row"><div>${f('Độ dài muốn (giây, để trống = như mẫu)',`<input id="aDur" type="number" step="0.5" min="1">`)}</div>
+    <div class="row"><div>${f('Độ dài muốn (giây, trống = như mẫu)',`<input id="aDur" type="number" step="0.5" min="1">`)}</div>
     <div>${f('Nhạc nền',`<select id="aMusic"><option value="">${P.music?'Giữ nhạc hiện tại':'Không nhạc'}</option>${auds.map(a=>`<option value="${a.id}">${esc(a.name)}</option>`).join('')}</select>`)}</div></div>
-    <div class="hint">Áp phong cách sẽ thay timeline hiện tại. Sau đó bạn vẫn chỉnh tay được như bình thường.</div>
+    <label class="chk"><input type="checkbox" id="aSmart" checked> Tự chọn đoạn đẹp trong clip (nét, có chuyển động, đủ sáng)</label>
+    <label class="chk"><input type="checkbox" id="aBeat"> Cắt khớp beat nhạc nền</label>
+    ${f('Clip ngắn hơn cảnh cần lấy thì',`<select id="aFill"><option value="hold">Dừng khung cuối cho đủ</option><option value="slow">Làm chậm clip cho đủ</option><option value="other">Để video ngắn lại</option></select>`)}
+    <div id="aMsg" class="hint"></div>
     <div class="row" style="margin-top:12px"><button id="aDel">Xoá phong cách này</button><button onclick="closeModal()">Huỷ</button><button class="pri" id="aGo">Áp dụng</button></div>`
     :'<div class="row" style="margin-top:12px"><button onclick="closeModal()">Đóng</button></div>'}`);
   const show=()=>{ const s=styles[+$('#aStyle').value]; if(!s) return; $('#aBars').innerHTML=barsHtml(s.shots||[s.duration||1]);
-    $('#aInfo').textContent=`Nguồn: ${s.source||'?'} · khung ${s.aspect||'9:16'}${(s.texts||[]).length?' · hook: "'+s.texts[0].text+'"':''}${s.punchIn?' · punch-in':''}`; };
+    $('#aInfo').textContent=`Nguồn: ${s.source||'?'} · khung ${s.aspect||'9:16'}${(s.texts||[]).length?' · hook: "'+s.texts[0].text+'"':''}${s.punchIn?' · punch-in':''}${s.bpm?' · '+s.bpm+' BPM':''}`;
+    $('#aBeat').checked=!!s.beatSync; };
   if(styles.length){ $('#aStyle').onchange=show; show();
-    $('#aGo').onclick=()=>{ const st=styles[+$('#aStyle').value]; const ids=[...document.querySelectorAll('.aClip:checked')].map(x=>x.value);
-      const items=ids.map(id=>item(id)).filter(Boolean); if(!items.length) return toast('Chọn ít nhất 1 clip.');
-      const warn=applyStyle(st, items, $('#aHook').value.trim(), +$('#aDur').value||0, $('#aMusic').value); closeModal(); toast('Đã áp phong cách "'+st.name+'". Bấm ▶ để xem, chỉnh tay nếu cần rồi Xuất video.'+(warn?'\n'+warn:''),7000); };
+    $('#aGo').onclick=async()=>{ const st=styles[+$('#aStyle').value]; const items=[...document.querySelectorAll('.aClip:checked')].map(x=>item(x.value)).filter(Boolean);
+      if(!items.length) return toast('Chọn ít nhất 1 clip.');
+      const musicId=$('#aMusic').value, beat=$('#aBeat').checked;
+      if(beat && !musicId && !P.music) return toast('Muốn khớp beat thì chọn nhạc nền.');
+      $('#aGo').disabled=true; const m=t=>{ const el=$('#aMsg'); if(el) el.textContent=t; };
+      try{ const note=await applyStyle(st, items, {hook:$('#aHook').value.trim(), targetDur:+$('#aDur').value||0, musicId, smart:$('#aSmart').checked, beat, fill:$('#aFill').value}, m);
+        closeModal(); toast('Đã áp phong cách "'+st.name+'"'+note+'.\nBấm ▶ để xem, chỉnh tay nếu cần rồi Xuất video.',8000);
+      }catch(err){ m('Lỗi: '+err.message); $('#aGo').disabled=false; } };
     $('#aDel').onclick=()=>{ const st=styles[+$('#aStyle').value]; saveStyles(styles.filter(x=>x!==st)); openApply(); toast('Đã xoá phong cách "'+st.name+'".'); };
   }
   $('#aImport').onclick=()=>$('#fStyle').click();
@@ -658,7 +818,7 @@ addEventListener('resize',layoutScreen);
   const recs=await DB.all();
   if(recs.length) await addFiles(recs.map(r=>{ const fl=new File([r.blob],r.name,{type:r.type||r.blob.type}); fl.id=r.id; return fl; }), false);
   relink(); P.clips=P.clips.filter(c=>item(c.id)); if(P.music&&!item(P.music.id)) P.music=null;
-  syncUI(); refresh(); requestAnimationFrame(ts=>{ lastTs=ts; tick(ts); });
+  syncUI(); refresh(); lastTs=performance.now(); requestAnimationFrame(loop);
 })();
 </script>
 </body>
